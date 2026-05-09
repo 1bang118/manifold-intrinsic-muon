@@ -1,7 +1,8 @@
-# NeurIPS 2026 — code
+# Manifold Intrinsic Muon
 
-This archive contains the code for all experiments in the paper. The two
-subdirectories are self-contained; each has its own setup, data preparation,
+
+This repository contains code for the experiments in the accompanying paper.
+The two subdirectories are self-contained; each has its own setup, data preparation,
 and run instructions in its own `README.md`.
 
 ## Contents
