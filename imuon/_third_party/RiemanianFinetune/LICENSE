@@ -1,0 +1,12 @@
+This directory redistributes the optimizer module
+`src/optimizers/RiemannianLoRA.py` from the public repository
+https://github.com/Bogachevv/RiemanianFinetune for the sole purpose of
+reproducing the Riemannion (SGD, no momentum) baseline reported in this
+paper.
+
+At the time of this submission (May 2026), the upstream repository does not
+include an explicit license file. Attribution is provided here in good
+faith, the file is vendored unmodified, and no claim of authorship is made
+over this third-party code. If you are the upstream author and wish this
+copy to be removed or relicensed, please raise it through the submission
+system.

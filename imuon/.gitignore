@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+
+# Editors
+.vscode/
+.idea/
+
+# Logs / outputs
+*.log
+outputs/
+checkpoints/
+wandb/

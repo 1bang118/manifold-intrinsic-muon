@@ -1,0 +1,17 @@
+name: manifold-lmo-spd-grassmann
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - numpy<2
+  - scipy
+  - pandas
+  - scikit-learn
+  - matplotlib
+  - tqdm
+  - pillow
+  - pytorch
+  - torchvision
+  - pytest
