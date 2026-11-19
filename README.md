@@ -8,11 +8,10 @@ and run instructions in its own `README.md`.
 ## Contents
 
 - [`imuon/`](imuon/) — **LLM fine-tuning experiments (E2E NLG).**
-  Reproduces the iMuon row of Table 1 (bit-exact) and the Table 5
-  no-momentum block (Vanilla Muon / iMuon / Riemannion-SGD at their
-  respective best learning rates) on GPT-2 Medium + LoRA r=4. See
-  [`imuon/README.md`](imuon/README.md) for hardware requirements, a
-  three-command quickstart, and the full reproduction grid.
+  Includes the corrected fixed-rank LoRA optimizer, training recipes for the
+  seed-110 result (70.30 BLEU) and three-seed result (70.06 ± 0.22), and the
+  predictions needed to verify all five metrics on CPU.
+  See the [E2E reproduction instructions](imuon/README.md).
 
 - [`non-llm/`](non-llm/) — **Non-LLM manifold experiments (appendix).**
   Fixed-rank synthetic matrix completion, CIFAR-100 fixed-rank heads,

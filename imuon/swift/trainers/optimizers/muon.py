@@ -194,6 +194,7 @@ class Muon(torch.optim.Optimizer):
         self._diagnostic_total_pairs = 0
         self._diagnostic_updated_pairs = 0
         self._diagnostic_skipped_pairs = 0
+        self._diagnostic_updated_logical_pairs = 0
         self._diagnostic_printed = False
         
         # Sort parameters into those for which we will use Muon, and those for which we will not
@@ -375,6 +376,7 @@ class Muon(torch.optim.Optimizer):
                         A_i, B_i, gA_i, gB_i, r, momentum, ns_steps, lr, wd, group
                     )
                 
+                self._diagnostic_updated_logical_pairs += k
                 updated.add(A)
                 updated.add(B)
                 self._diagnostic_updated_pairs += 1
@@ -386,6 +388,7 @@ class Muon(torch.optim.Optimizer):
                 A.data, B.data, gA, gB, r, momentum, ns_steps, lr, wd, group
             )
             
+            self._diagnostic_updated_logical_pairs += 1
             updated.add(A)
             updated.add(B)
             self._diagnostic_updated_pairs += 1
@@ -671,49 +674,47 @@ class Muon(torch.optim.Optimizer):
         self._apply_lora_update(A, B, dA, dB, lr, wd)
 
     def _apply_single_lora_pair_update_v5_compact(self, A, B, gA, gB, r, momentum, ns_steps, lr, wd, group):
-        """Variant v5_compact: compact-QR form of V5 (Section 3.3 of the paper draft).
+        """Rank-r QR implementation of arXiv:2605.09238 Corollary 4.1.
 
-        Algorithm (exact match to scripts/test_lora_stability_exact.py compute_v5_compact):
-            Q_A, R_A = QR(A^T)                                    # Q_A: (n,r), R_A: (r,r)
-            Q_B, R_B = QR(B)                                      # Q_B: (m,r), R_B: (r,r)
-            dB = Ortho(M_B R_A^T + B (M_A Q_A)) @ (R_A^T R_A + eps I)^{-1} R_A^T
-            dA = (R_B^T R_B + eps I)^{-1} R_B^T @ Ortho(Q_B^T M_B A + R_B M_A)
+        For A.T = Q_A R_A and B = Q_B R_B, the unit-radius LMO is
+        dB = polar(gB R_A^{-1}) R_A^{-T},
+        dA = R_B^{-1} polar(R_B^{-T} gA).
+        Factor gradients are already momentum-accumulated by the caller.
+        No reconstructed ambient momentum or 2r projection is needed.
 
-        Orthogonalization targets are r×? / ?×r full-rank matrices, so Newton-Schulz
-        operates at the intrinsic rank r of the problem without the 2r-column null
-        space present in the projection form.
-
-        Note: gA and gB are already momentum-accumulated gradients from the caller.
+        eps > 0 uses QR of [factor; sqrt(eps) I], so R.T R equals
+        the damped Gram. This is a regularized extension at singular LoRA
+        initialization, not the undamped full-rank corollary. NS is the
+        configured approximate polar; SVD computes the partial polar.
         """
-        MA = gA
-        MB = gB
+        dtype = torch.float64 if A.dtype == torch.float64 else torch.float32
+        A_work, B_work = A.to(dtype), B.to(dtype)
+        MA, MB = gA.to(dtype), gB.to(dtype)
+        eps = self.lora_precond_eps
+        if eps < 0:
+            raise ValueError("compact iMuon requires nonnegative lora_precond_eps")
+        A_qr, B_qr = A_work.T, B_work
+        if eps:
+            ridge = math.sqrt(eps) * torch.eye(r, device=A.device, dtype=dtype)
+            A_qr = torch.cat((A_qr, ridge), dim=0)
+            B_qr = torch.cat((B_qr, ridge), dim=0)
+        # Only the r x r triangular factors are retained.
+        R_A = torch.linalg.qr(A_qr, mode='r').R
+        R_B = torch.linalg.qr(B_qr, mode='r').R
 
-        A32 = A.to(torch.float32)
-        B32 = B.to(torch.float32)
-        MA32 = MA.to(torch.float32)
-        MB32 = MB.to(torch.float32)
+        def polar(value):
+            if (self.lora_riemannian_ortho_method or 'ns').lower() == 'svd':
+                U, s, Vh = torch.linalg.svd(value, full_matrices=False)
+                # Avoid arbitrary null-space completion, especially gA=0 at B=0.
+                cutoff = torch.finfo(dtype).eps * max(value.shape) * s.max()
+                return (U * (s > cutoff).to(dtype)) @ Vh
+            return zeropower_via_newtonschulz5(value, steps=ns_steps).to(dtype)
 
-        # Thin QR on rank-r factors.
-        Q_A, R_A = torch.linalg.qr(A32.T, mode='reduced')   # Q_A: (n, r), R_A: (r, r)
-        Q_B, R_B = torch.linalg.qr(B32,   mode='reduced')   # Q_B: (m, r), R_B: (r, r)
-
-        eye = torch.eye(r, device=A.device, dtype=torch.float32)
-        inv_RBT_RB = self._inv_gram(R_B.T @ R_B + self.lora_precond_eps * eye)
-        inv_RAT_RA = self._inv_gram(R_A.T @ R_A + self.lora_precond_eps * eye)
-
-        # --- dB = Ortho(M_t Q_A) @ (R_A^T R_A + eps I)^{-1} R_A^T ---
-        # M_t Q_A = M_B (A Q_A) + B (M_A Q_A) = M_B R_A^T + B (M_A Q_A)   since A Q_A = R_A^T
-        Mt_QA = MB32 @ R_A.T + B32 @ (MA32 @ Q_A)                         # (m, r)
-        ortho_Mt_QA = self._ortho_core(Mt_QA, ns_steps=ns_steps).to(torch.float32)
-        dB = ortho_Mt_QA @ (inv_RAT_RA @ R_A).T                            # (m, r)
-
-        # --- dA = (R_B^T R_B + eps I)^{-1} R_B^T @ Ortho(Q_B^T M_t) ---
-        # Q_B^T M_t = (Q_B^T M_B) A + (Q_B^T B) M_A = (Q_B^T M_B) A + R_B M_A
-        QB_Mt = Q_B.T @ MB32 @ A32 + R_B @ MA32                            # (r, n)
-        ortho_QB_Mt = self._ortho_core(QB_Mt, ns_steps=ns_steps).to(torch.float32)
-        dA = inv_RBT_RB @ (R_B.T @ ortho_QB_Mt)                            # (r, n)
-
-        # Apply weight decay and update
+        # Right solves are expressed as transposed left triangular solves.
+        H_B = torch.linalg.solve_triangular(R_A.T, MB.T, upper=False).T
+        H_A = torch.linalg.solve_triangular(R_B.T, MA, upper=False)
+        dB = torch.linalg.solve_triangular(R_A, polar(H_B).T, upper=True).T
+        dA = torch.linalg.solve_triangular(R_B, polar(H_A), upper=True)
         self._apply_lora_update(A, B, dA, dB, lr, wd)
 
     def _apply_lora_update(self, A, B, dA, dB, lr, wd):
@@ -795,10 +796,10 @@ class Muon(torch.optim.Optimizer):
                 loss = closure()
 
         # Reset diagnostic counters at start of step
-        if not self._diagnostic_printed:
-            self._diagnostic_total_pairs = 0
-            self._diagnostic_updated_pairs = 0
-            self._diagnostic_skipped_pairs = 0
+        self._diagnostic_total_pairs = 0
+        self._diagnostic_updated_pairs = 0
+        self._diagnostic_skipped_pairs = 0
+        self._diagnostic_updated_logical_pairs = 0
 
         for group in self.param_groups:
 
@@ -903,6 +904,7 @@ class Muon(torch.optim.Optimizer):
             print(f"  Variant: {self.lora_riemannian_variant}")
             print(f"  Total LoRA pairs found: {len(self.lora_pairs)}")
             print(f"  Pairs updated this step: {self._diagnostic_updated_pairs}")
+            print(f"  Logical sub-pairs updated this step: {self._diagnostic_updated_logical_pairs}")
             print(f"  Pairs skipped this step: {self._diagnostic_skipped_pairs}")
             if self._diagnostic_updated_pairs == 0 and len(self.lora_pairs) > 0:
                 print("  ⚠️  WARNING: No LoRA pairs were updated! Check shapes.")
