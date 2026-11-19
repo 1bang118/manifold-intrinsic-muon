@@ -22,13 +22,17 @@ fi
 # ---- 1. GPT-2 Medium pretrained checkpoint ----
 mkdir -p "$CKPT_DIR"
 CKPT_FILE="$CKPT_DIR/gpt2-medium-pytorch_model.bin"
-if [ -f "$CKPT_FILE" ] && [ "$(stat -c%s "$CKPT_FILE" 2>/dev/null || stat -f%z "$CKPT_FILE")" -gt 1000000000 ]; then
-    echo "GPT-2 Medium ckpt already present ($CKPT_FILE)"
+checkpoint_sha=98c7b0558df2c732799e509a8157d392251b3a6b06e2c72eefb3a00eb10f8318
+if [[ -e "$CKPT_FILE" || -L "$CKPT_FILE" ]]; then
+    echo "$checkpoint_sha  $CKPT_FILE" | sha256sum -c -
 else
-    echo "=== Downloading GPT-2 Medium pretrained checkpoint (~1.5 GB) ==="
-    # Canonical HF mirror of the original openai-community/gpt2-medium weights.
-    wget -q --show-progress -O "$CKPT_FILE" \
-        https://huggingface.co/openai-community/gpt2-medium/resolve/main/pytorch_model.bin
+    download=$(mktemp "$CKPT_DIR/.gpt2-medium.XXXXXX")
+    trap 'rm -f "$download"' EXIT
+    wget -q --show-progress -O "$download" \
+        https://huggingface.co/openai-community/gpt2-medium/resolve/6dcaa7a952f72f9298047fd5137cd6e4f05f41da/pytorch_model.bin
+    echo "$checkpoint_sha  $download" | sha256sum -c -
+    mv "$download" "$CKPT_FILE"
+    trap - EXIT
 fi
 
 # ---- 2. Format raw .txt (context||completion) -> .jsonl ({context, completion}) ----
@@ -81,5 +85,6 @@ encode_split valid
 encode_split test
 
 echo ""
+(cd "$NLG_ROOT" && sha256sum -c "$IMUON_ROOT/requirements/e2e_inputs.sha256")
 echo "=== data_prep.sh done. Next: bash run_imuon_v5_nomom.sh ==="
 ls -lh "$DATA_DIR"/*.jsonl "$CKPT_FILE"

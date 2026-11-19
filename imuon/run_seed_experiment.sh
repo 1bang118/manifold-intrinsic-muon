@@ -1,28 +1,5 @@
 #!/bin/bash
-# Variance / multi-seed experiment runner for the no-momentum block of Table 5.
-#
-# Selects between two methods (Muon, iMuon V5) — each at its respective best
-# learning rate — and runs train + beam decode + scoring with a chosen random
-# seed. Writes outputs to a seed-stamped subdirectory so concurrent seeds do
-# not collide.
-#
-# Required env vars:
-#   METHOD     muon  | imuon
-#   SEED       integer (e.g. 42, 110, ...)
-#
-# Optional env vars:
-#   VENV_DIR   path to the python venv      (default: $IMUON_ROOT/.venv)
-#   WORK_DIR   override training output dir (default: $IMUON_ROOT/runs/<method>_nomom_seed<SEED>)
-#   HF_HOME    HuggingFace cache            (default: $IMUON_ROOT/.cache/hf)
-#
-# Best-LR pinning (from Table 5, no-momentum block):
-#   muon  → lr=1e-3   (BLEU 70.02 at seed=110)
-#   imuon → lr=5e-3   (BLEU 70.74 at seed=110)
-#
-# Usage:
-#   METHOD=muon  SEED=42 bash run_seed_experiment.sh
-#   METHOD=imuon SEED=42 bash run_seed_experiment.sh
-
+# Train, beam-decode and score the selected rank-4 E2E recipe.
 set -euo pipefail
 
 if [ -z "${METHOD:-}" ] || [ -z "${SEED:-}" ]; then
@@ -35,7 +12,6 @@ IMUON_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export REPO_DIR="$IMUON_ROOT"
 
 VENV_DIR="${VENV_DIR:-$IMUON_ROOT/.venv}"
-WORK_DIR="${WORK_DIR:-$IMUON_ROOT/runs/${METHOD}_nomom_seed${SEED}}"
 HF_HOME="${HF_HOME:-$IMUON_ROOT/.cache/hf}"
 
 PYTHON="$VENV_DIR/bin/python"
@@ -52,21 +28,38 @@ case "$METHOD" in
         METHOD_FLAGS=(--muon_momentum 0.0 --no_muon_nesterov --muon_ns_steps 5)
         TARGET_BLEU="70.02"
         ;;
-    imuon)
-        LR=0.005
-        EXP_NAME="imuon_v5_nomom_seed${SEED}"
-        # iMuon V5: Muon + Riemannian update + variant v5 + Riemannian LR adjust
+    imuon|imuon_legacy)
+        variant=v5_compact
+        LR=0.05
+        TARGET_BLEU=70.30
+        if [[ "$METHOD" == imuon_legacy ]]; then
+            variant=v5
+            LR=0.005
+            TARGET_BLEU=70.74
+        fi
+        EXP_NAME="imuon_${variant}_nomom_seed${SEED}"
         METHOD_FLAGS=(--muon_momentum 0.0 --no_muon_nesterov --muon_ns_steps 5 \
                       --muon_lora_riemannian_muon \
                       --muon_lora_riemannian_adjust_lr \
-                      --muon_lora_riemannian_variant v5)
-        TARGET_BLEU="70.74"
+                      --muon_lora_riemannian_variant "$variant" --muon_lora_precond_eps 1e-6
+                      --muon_lora_riemannian_ortho_method ns --expected_lora_pairs 48)
         ;;
     *)
-        echo "ERROR: unknown METHOD='$METHOD' (expected: muon | imuon)" >&2
+        echo "ERROR: unknown METHOD='$METHOD' (expected: muon | imuon | imuon_legacy)" >&2
         exit 1
         ;;
 esac
+
+# A two-update smoke exercises the same model/data/optimizer and saves a checkpoint.
+
+FINAL_STEP=26290
+if [[ "${E2E_SMOKE:-0}" == 1 ]]; then
+    EXP_NAME="${EXP_NAME}_smoke"
+    FINAL_STEP=2
+    METHOD_FLAGS+=(--max_step 2 --log_interval 1)
+fi
+WORK_DIR="${WORK_DIR:-$IMUON_ROOT/runs/$EXP_NAME}"
+export PYTHONPATH="$PILANCILAB_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
 if [ ! -x "$PYTHON" ]; then
     echo "ERROR: venv not found at $VENV_DIR. Run setup_env.sh first." >&2
@@ -140,12 +133,16 @@ echo ""
 echo "Training complete: $(date)"
 
 # ---- 2. Beam decode ----
-FINAL_CKPT="$(ls -t "$WORK_DIR"/model_${EXP_NAME}.*.pt 2>/dev/null | head -1 || true)"
-if [ -z "$FINAL_CKPT" ]; then
-    echo "ERROR: No checkpoint produced in $WORK_DIR" >&2
+FINAL_CKPT="$WORK_DIR/model_${EXP_NAME}.${FINAL_STEP}.pt"
+if [ ! -s "$FINAL_CKPT" ]; then
+    echo "ERROR: Missing final checkpoint $FINAL_CKPT" >&2
     exit 1
 fi
 echo "Using checkpoint: $FINAL_CKPT"
+if [[ "${E2E_SMOKE:-0}" == 1 ]]; then
+    "$PYTHON" -c 'import sys, torch; assert torch.load(sys.argv[1], map_location="cpu")["model_state_dict"]' "$FINAL_CKPT"
+    exit 0
+fi
 
 MASTER_PORT=$((29500 + RANDOM % 1000))
 "$PYTHON" -m torch.distributed.launch --nproc_per_node=1 --master_port="$MASTER_PORT" \

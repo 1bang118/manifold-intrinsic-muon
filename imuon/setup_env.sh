@@ -64,34 +64,20 @@ grep -Ev '^(#|$|torch(==|$)|torchvision|torchaudio|triton(==|$))' "$LOCKFILE" > 
 "$UV_BIN" pip install --no-deps --python "$VENV_DIR/bin/python" -r "$TMP_REST"
 rm -f "$TMP_REST"
 
-# ---- 4b. Supplementary deps used by the pilancilab GPT-2 harness ----
-# These come from _third_party/pilancilab/GPT2/examples/NLG/requirement.txt
-# (torch, transformers, regex, tqdm are already pinned in the main lockfile;
-# the three below were not, because the lockfile was captured from a
-# commonsense env that never ran the GPT-2 NLG harness). All three are
-# imported somewhere in the harness, so install them defensively to avoid
-# a "discover-one-missing-pkg-at-a-time" debug loop.
-#   progress     - gpt2_encode.py uses progress.bar
-#   spacy        - tokenization utility imported by some harness paths
-#   tensorboard  - logging during training
-echo "=== Installing harness-specific supplementary deps ==="
-"$UV_BIN" pip install --no-deps --python "$VENV_DIR/bin/python" \
-    progress==1.6
-# spacy + tensorboard are listed in pilancilab/GPT2/examples/NLG/requirement.txt
-# but verified-not-imported in the iMuon code path. Installing as a safety net;
-# `|| true` prevents a transient install hiccup from aborting the whole setup,
-# since the iMuon run does not depend on either.
-"$UV_BIN" pip install --python "$VENV_DIR/bin/python" \
-    spacy tensorboard || echo "(spacy/tensorboard install non-fatal; iMuon run does not require them)"
+# BPE encoder dependency, additional to the frozen training environment.
+"$UV_BIN" pip install --no-deps --python "$VENV_DIR/bin/python" progress==1.6
 
-# ---- 5. e2e-metrics ----
-if [ -d "$E2E_METRICS_DIR/.git" ] || [ -f "$E2E_METRICS_DIR/measure_scores.py" ]; then
-    echo "e2e-metrics already present at $E2E_METRICS_DIR (reusing)"
-else
-    echo "=== Cloning tuetschek/e2e-metrics ==="
-    mkdir -p "$IMUON_ROOT/_third_party"
-    git clone --depth 1 https://github.com/tuetschek/e2e-metrics.git "$E2E_METRICS_DIR"
+# Pin the scorer used for the published predictions, including its METEOR jar.
+scorer_commit=1b9c4d87fd0bbb171ea966741cdc012588581ed4
+if [[ ! -d "$E2E_METRICS_DIR" ]]; then
+    git clone https://github.com/tuetschek/e2e-metrics.git "$E2E_METRICS_DIR"
+    git -C "$E2E_METRICS_DIR" checkout --detach "$scorer_commit"
 fi
+if [[ "$(git -C "$E2E_METRICS_DIR" rev-parse HEAD)" != "$scorer_commit" ]]; then
+    echo "Expected e2e-metrics revision $scorer_commit at $E2E_METRICS_DIR" >&2
+    exit 1
+fi
+java -version
 
 # ---- 6. quick sanity ----
 echo ""

@@ -83,6 +83,8 @@ parser.add_argument('--roll_step', type=int, default=100, help='rolling step')
 parser.add_argument('--eval_epoch', type=int, default=1, help='eval per number of epochs')
 
 # Muon-specific arguments
+parser.add_argument('--expected_lora_pairs', type=int, default=0,
+                    help='Verify logical adapter coverage after each optimizer update')
 parser.add_argument('--muon_momentum', type=float, default=0.95, help='Muon momentum')
 parser.add_argument('--muon_nesterov', action='store_true', help='Use Nesterov momentum (default: enabled)')
 parser.add_argument('--no_muon_nesterov', dest='muon_nesterov', action='store_false', help='Disable Nesterov')
@@ -103,7 +105,7 @@ parser.add_argument('--muon_lora_riemannian_variant', type=str, default='full',
                     help='Riemannian Muon variant: full (original), v2 (Ortho then precond), '
                          'v3 (precond then Ortho), v4 (horizontal projection), '
                          'v5 (projected QR variant), v5_warmup (V1 for first 50 steps then V5), '
-                         'v5_compact (compact-QR form, Section 3.3), '
+                         'v5_compact (direct factor-gradient QR update, Corollary 4.1), '
                          'v5_compact_warmup (V1 for first 50 steps then V5 compact)')
 
 # Weights & Biases (optional)
@@ -201,7 +203,14 @@ def optimizer_step(_loss, _optimizer, _model, _schedule, args, is_update=True):
             else:
                 torch.nn.utils.clip_grad_norm_(_model.parameters(), args.clip)
 
-        _optimizer.step()        
+        _optimizer.step()
+        if args.expected_lora_pairs and (
+            _optimizer._diagnostic_updated_logical_pairs != args.expected_lora_pairs
+            or _optimizer._diagnostic_skipped_pairs
+        ):
+            raise RuntimeError(f'Expected {args.expected_lora_pairs} logical LoRA updates, '
+                               f'got {_optimizer._diagnostic_updated_logical_pairs} '
+                               f'with {_optimizer._diagnostic_skipped_pairs} skipped parents')
         _optimizer.zero_grad()
 
     if _schedule is not None:
